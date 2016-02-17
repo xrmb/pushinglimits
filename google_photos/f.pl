@@ -11,6 +11,9 @@ use Graphics::Color::HSV;
 use DateTime;
 use Time::Local;
 use Sys::Hostname;
+
+use Whatsup;
+
 use strict;
 
 srand();
@@ -178,7 +181,7 @@ my $wait = -1;
 my $c = 0;
 
 
-opendir(my $dh, $path);
+opendir(my $dh, $path) || die;
 my ($of) = reverse sort grep { /$ext$/ } readdir($dh);
 closedir($dh);
 if($of)
@@ -187,7 +190,6 @@ if($of)
   my $dt = DateTime->new(year => substr($of, 0, 4), month => substr($of, 4, 2), day => substr($of, 6, 2),
                          hour => substr($of, 9, 2), minute => substr($of, 11, 2), second => substr($of, 13, 2), time_zone => '-0400');
   $time = $dt->epoch();
-  printf("date/time: %s\n", scalar localtime($time));
 }
 
 my $every = 20;
@@ -202,9 +204,10 @@ MAIN: for(;;)
   while($lfn eq $fn || $fn && -f $fn)
   {
     if(ReadKey($wait) || '' eq 'x') { last MAIN; }
-    my @ts = localtime($time);
-    $fn = sprintf('%s/%04d%02d%02d_%02d%02d%02d.%s', $path, $ts[5]+1900, $ts[4]+1, $ts[3], $ts[2], $ts[1], int($ts[0]/$every)*$every, $ext);
-    $con->Title(sprintf('%04d-%02d-%02d %02d:%02d:%02d', $ts[5]+1900, $ts[4]+1, $ts[3], $ts[2], $ts[1], int($ts[0]/$every)*$every));
+    my $dt = DateTime->from_epoch(epoch => $time, time_zone => '-0400');
+    $dt->set(second => int($dt->second()/$every)*$every);
+    $fn = sprintf('%s/%s_%s.%s', $path, $dt->ymd(''), $dt->hms(''), $ext);
+    $con->Title($dt->ymd() .' '. $dt->hms());
     if($wait > 0) { icon(); }
     if($time < time()+10_000_000) { $time++; $wait = -1; } else { $wait = 1; }
   }
@@ -249,6 +252,7 @@ MAIN: for(;;)
     open(my $log, '<', $gab.'network.log') || warn('cant open log') && sleep(5) && next;
     my $size = -s $gab.'network.log';
     if($size > 10000) { seek($log, $size - 10000, 0) || warn('cant seek log') && sleep(5) && next; }
+    my $done = 0;
     while(my $l = <$log>)
     {
       if(($l =~ m/Uploaded file \((\w+\.jpg),/ || $l =~ m/(\w+\.jpg)\s+: Media exists/) && "$path/$1" ne $fn && -f "$path/$1")
@@ -264,9 +268,11 @@ MAIN: for(;;)
             time_zone => '-0400'
           )->epoch();
         unlink("$path/$1");
+        $done++;
       }
     }
     close($log);
+    if($done) { Whatsup->record(app => 'pushinglimits', google_photos => $done); }
 
     if($waiting > 10)
     {
