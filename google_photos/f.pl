@@ -272,7 +272,7 @@ MAIN: for(;;)
       }
     }
     close($log);
-    if($done) { Whatsup->record(app => 'pushinglimits', google_photos => $done); }
+    if($done) { Whatsup->record(app => 'pushinglimits', google_photos => $done, lag => time()-$time); }
 
     if($waiting > 10)
     {
