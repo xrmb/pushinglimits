@@ -105,7 +105,7 @@ sub mkimg
   $i->Set('sampling-factor' => '1x1');
   ($$fd) = $i->ImageToBlob();
 
-  open(my $fh, '>>', 'logs/'.hostname().'.log');
+  open(my $fh, '>>', __FILE__.'/../logs/'.hostname().'.log');
   printf($fh "%d\t%d\t%d\t%s\t%s\n", $base % 360, $q, length($$fd), DateTime->from_epoch(epoch => $now)->iso8601(), DateTime->from_epoch(epoch => $time)->iso8601());
   close($fh);
 
@@ -177,28 +177,178 @@ mkdir($path);
 my $lfn;
 my $fn;
 my $time = time()-12345;
+my $every = 15;
 my $wait = -1;
-my $c = 0;
 
 
-opendir(my $dh, $path) || die;
-my ($of) = reverse sort grep { /$ext$/ } readdir($dh);
-closedir($dh);
-if($of)
+my @of;
+if(open(my $fh, '<', __FILE__.'/../logs/last.dat'))
 {
+  my $of = <$fh>;
+  close($fh);
+  if($of =~ /^\w+.jpg$/)
+  {
+    push(@of, $of);
+  }
+}
+
+
+{
+  opendir(my $dh, $path) || die;
+  my ($of) = reverse sort grep { /$ext$/ } readdir($dh);
+  closedir($dh);
+  if($of =~ /^\w+.jpg$/)
+  {
+    push(@of, $of);
+  }
+}
+
+
+if(open(my $log, '<', $gab.'network.log'))
+{
+  my $of;
+  while(my $l = <$log>)
+  {
+    if(($l =~ m/Uploaded file \((\w+\.jpg),/ || $l =~ m/(\w+\.jpg)\s+: Media exists/) && $1 ge $of)
+    {
+      $of = $1;
+    }
+  }
+  close($log);
+  if($of) { push(@of, $of); }
+}
+
+
+if(open(my $fh, '<', __FILE__.'/../logs/'.hostname().'.log'))
+{
+  my $of;
+  while(my $l = <$fh>)
+  {
+    my @l = split(/\s/, $l);
+    if($l[3] && $l[3] ge $of)
+    {
+      $of = $l[3];
+    }
+  }
+  close($fh);
+  if($of) { $of =~ s/[\-:]//g; push(@of, $of); }
+}
+
+
+if(@of)
+{
+  my ($of) = reverse(sort(@of));
   printf("newest: %s\n", $of);
   my $dt = DateTime->new(year => substr($of, 0, 4), month => substr($of, 4, 2), day => substr($of, 6, 2),
                          hour => substr($of, 9, 2), minute => substr($of, 11, 2), second => substr($of, 13, 2), time_zone => '-0400');
-  $time = $dt->epoch();
+  $time = $dt->epoch() + $every;
+}
+else
+{
+  die;
 }
 
-my $every = 20;
+
 my $lastup;
 MAIN: for(;;)
 {
-  if($time >= 1430834400) { $every = 15; }
-  if($time >= 1433116800) { $every = 20; } # 2015-06-01 00:00:00
-  if($time >= 1434326460) { $every = 15; } # 2015-06-15 01:00:00
+  my $start = Time::HiRes::time();
+  my $actions = '';
+  for(;;)
+  {
+    if(ReadKey($wait) || '' eq 'x') { last MAIN; }
+
+    opendir(my $dh, $path);
+    my $waiting = grep(/jpg$/, readdir($dh));
+    closedir($dh);
+
+    my $for = Time::HiRes::time()-$start;
+    printf("%s\t%s\t%ds make lag\t%d uploads\t%.1fs work\n", scalar(localtime()), $fn, time()-$time, $waiting, $for);
+
+    open(my $log, '<', $gab.'network.log') || warn('cant open log') && sleep(5) && next;
+    my $size = -s $gab.'network.log';
+    if($size > 10000) { seek($log, $size - 10000, 0) || warn('cant seek log') && sleep(5) && next; }
+    my $done = 0;
+    while(my $l = <$log>)
+    {
+      if(($l =~ m/Uploaded file \((\w+\.jpg),/ || $l =~ m/(\w+\.jpg)\s+: Media exists/) && "$path/$1" ne $fn && -f "$path/$1")
+      {
+        my $fn = $1;
+        #print("unlink $path/$1\n");
+        $lastup = DateTime->new(
+            year      => substr($fn, 0, 4),
+            month     => substr($fn, 4, 2),
+            day       => substr($fn, 6, 2),
+            hour      => substr($fn, 9, 2),
+            minute    => substr($fn, 11, 2),
+            second    => substr($fn, 13, 2),
+            time_zone => '-0400'
+          )->epoch();
+        unlink("$path/$fn");
+        $done++;
+
+        if(open(my $fh, '>', __FILE__.'/../logs/last.dat'))
+        {
+          print($fh "$fn\n");
+          close($fh);
+        }
+      }
+    }
+    close($log);
+    if($done) { Whatsup->record(app => 'pushinglimits', google_photos => $done, lag => time()-$time); }
+
+    if($waiting > 10)
+    {
+      ### restart myself ###
+      if($for > 900 && $actions !~ /r/)
+      {
+        my $cmd = "start $0";
+        print("$cmd\n");
+        system($cmd);
+
+        sleep(100);
+        $actions .= 'r';
+        exit;
+      }
+
+      ### restart backup ###
+      if($for > 300 && $actions !~ /g/)
+      {
+        my $kill = $exe;
+        $kill =~ s/^.*\\//;
+        my $cmd = qq'pskill "$kill"';
+        print("$cmd\n");
+        system($cmd);
+
+        unlink("$gab/db/$cfg{account}/files.dat");
+        unlink("$gab/db/$cfg{account}/thumbindex.db");
+
+        $cmd = qq'start "title" "$exe"';
+        print("$cmd\n");
+        system($cmd);
+
+        $actions .= 'g';
+      }
+
+      ### cleanup oldest ###
+      if($for > 600 && $actions !~ /c/)
+      {
+        opendir(my $dh, $path);
+        my @f = sort grep { /\.jpg$/ } readdir($dh);
+        closedir($dh);
+
+        print("unlink $path/$f[0]\n");
+        unlink("$path/$f[0]");
+
+        $actions .= 'c';
+      }
+
+      sleep(5);
+      next;
+    }
+    last;
+  }
+
 
 
   while($lfn eq $fn || $fn && -f $fn)
@@ -213,7 +363,6 @@ MAIN: for(;;)
   }
   $lfn = $fn;
 
-  my $start = Time::HiRes::time();
   my $fd;
   icon();
   my $base = mkimg(\$fd, $time/$every, time(), $time);
@@ -235,105 +384,4 @@ MAIN: for(;;)
   binmode($fh);
   print($fh $fd);
   close($fh);
-
-
-  my $actions = '';
-  for(;;)
-  {
-    if(ReadKey($wait) || '' eq 'x') { last MAIN; }
-
-    opendir(my $dh, $path);
-    my $waiting = grep(/jpg$/, readdir($dh));
-    closedir($dh);
-
-    my $for = Time::HiRes::time()-$start;
-    printf("%s\t%s\t%d\t%ds make lag\t%d uploads\t%.1fs work\n", scalar(localtime()), $fn, $l, time()-$time, $waiting, $for);
-
-    open(my $log, '<', $gab.'network.log') || warn('cant open log') && sleep(5) && next;
-    my $size = -s $gab.'network.log';
-    if($size > 10000) { seek($log, $size - 10000, 0) || warn('cant seek log') && sleep(5) && next; }
-    my $done = 0;
-    while(my $l = <$log>)
-    {
-      if(($l =~ m/Uploaded file \((\w+\.jpg),/ || $l =~ m/(\w+\.jpg)\s+: Media exists/) && "$path/$1" ne $fn && -f "$path/$1")
-      {
-        #print("unlink $path/$1\n");
-        $lastup = DateTime->new(
-            year      => substr($1, 0, 4),
-            month     => substr($1, 4, 2),
-            day       => substr($1, 6, 2),
-            hour      => substr($1, 9, 2),
-            minute    => substr($1, 11, 2),
-            second    => substr($1, 13, 2),
-            time_zone => '-0400'
-          )->epoch();
-        unlink("$path/$1");
-        $done++;
-      }
-    }
-    close($log);
-    if($done) { Whatsup->record(app => 'pushinglimits', google_photos => $done, lag => time()-$time); }
-
-    if($waiting > 10)
-    {
-      ### restart myself ###
-      if($for > 3000 && $actions !~ /r/)
-      {
-        my $cmd = "start $0";
-        print("$cmd\n");
-        system($cmd);
-
-        sleep(100);
-        $actions .= 'r';
-        exit;
-      }
-
-      ### restart backup ###
-      if($for > 1000 && $actions !~ /g/)
-      {
-        my $kill = $exe;
-        $kill =~ s/^.*\\//;
-        my $cmd = qq'pskill "$kill"';
-        print("$cmd\n");
-        system($cmd);
-
-        unlink("$gab/db/$cfg{account}/files.dat");
-        unlink("$gab/db/$cfg{account}/thumbindex.db");
-
-        $cmd = qq'start "title" "$exe"';
-        print("$cmd\n");
-        system($cmd);
-
-        $actions .= 'g';
-      }
-
-      ### cleanup oldest ###
-      if($for > 2000 && $actions !~ /c/)
-      {
-        opendir(my $dh, $path);
-        my @f = sort grep { /\.jpg$/ } readdir($dh);
-        closedir($dh);
-
-        print("unlink $path/$f[0]\n");
-        unlink("$path/$f[0]");
-
-        $actions .= 'c';
-      }
-
-      sleep(5);
-      next;
-    }
-    last;
-  }
-
-  $c++;
-  if(0 && $c % 10 == 0)
-  {
-    #my %wait = map { $_ => 1 } ($fd =~ m/\d+_\d+\.$ext/g);
-    my %wait;
-
-    opendir(my $dh, $path);
-    map { !$wait{$_} && -f $path.'/'.$_ && (time() - (stat($path.'/'.$_))[9]) > 12345 && unlink($path.'/'.$_) } readdir($dh);
-    closedir($dh);
-  }
 }
